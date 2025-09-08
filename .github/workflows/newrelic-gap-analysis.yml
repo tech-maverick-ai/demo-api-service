@@ -20,9 +20,12 @@ jobs:
           response=$(curl -s -X POST \
             "${{ vars.MCP_SERVER_URL || 'http://localhost:8080/remote/mcp/' }}" \
             -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
             -H "api-key: ${{ secrets.NEWRELIC_API_KEY }}" \
             -H "github-token: ${{ secrets.GITHUB_TOKEN }}" \
             -d '{
+              "jsonrpc": "2.0",
+              "id": "github-action-request",
               "method": "tools/call",
               "params": {
                 "name": "analyze_github_newrelic_gaps",
