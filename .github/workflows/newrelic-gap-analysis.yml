@@ -1,0 +1,110 @@
+name: New Relic MCP Gap Analysis
+
+# 🎯 Triggers: When releases are created or manual dispatch
+on:
+  release:
+    types: [published, created]
+  workflow_dispatch:  # Manual trigger for testing
+
+jobs:
+  analyze-newrelic-gaps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔍 Analyze New Relic Monitoring Gaps
+        run: |
+          echo "🚀 Repository: ${{ github.repository }}"
+          echo "📦 Release: ${{ github.event.release.tag_name || 'Manual trigger' }}"
+          echo "🏢 Organization: ${{ github.repository_owner }}"
+          
+          # Call your MCP server tool
+          response=$(curl -s -X POST \
+            "${{ vars.MCP_SERVER_URL || 'http://localhost:8080/remote/mcp/' }}" \
+            -H "Content-Type: application/json" \
+            -H "api-key: ${{ secrets.NEWRELIC_API_KEY }}" \
+            -H "github-token: ${{ secrets.GITHUB_TOKEN }}" \
+            -d '{
+              "method": "tools/call",
+              "params": {
+                "name": "analyze_github_newrelic_gaps",
+                "arguments": {
+                  "account_id": ${{ vars.NEWRELIC_ACCOUNT_ID }},
+                  "github_org": "${{ github.repository_owner }}",
+                  "days_back": 30
+                }
+              }
+            }')
+          
+          echo "📥 MCP Response:"
+          echo "$response" | jq '.'
+          
+          # Extract key metrics
+          total_repos=$(echo "$response" | jq -r '.result.analysis.summary.total_github_repos // 0')
+          missing_apm=$(echo "$response" | jq -r '.result.analysis.summary.repos_missing_apm // 0')
+          coverage=$(echo "$response" | jq -r '.result.analysis.summary.repos_with_monitoring // 0')
+          
+          echo ""
+          echo "📊 === RESULTS SUMMARY ==="
+          echo "Total repositories: $total_repos"
+          echo "Missing APM monitoring: $missing_apm"
+          echo "With monitoring: $coverage"
+          
+          if [ "$missing_apm" -gt 0 ]; then
+            echo ""
+            echo "⚠️  Repositories missing New Relic monitoring:"
+            echo "$response" | jq -r '.result.analysis.gaps[]? | "  - \(.name) (\(.language // "Unknown"))"'
+            
+            echo ""
+            echo "💡 Recommended services:"
+            echo "$response" | jq -r '.result.analysis.recommendations[]? | "  \(.repo_name): \(.suggested_services | join(", "))"'
+          else
+            echo "✅ All repositories have monitoring coverage!"
+          fi
+          
+          # Save results for artifacts
+          echo "$response" > mcp-analysis-results.json
+
+      - name: 📤 Upload Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: newrelic-gap-analysis-${{ github.run_number }}
+          path: mcp-analysis-results.json
+
+      - name: 💬 Comment on Release
+        if: github.event_name == 'release'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const results = JSON.parse(fs.readFileSync('mcp-analysis-results.json', 'utf8'));
+              const summary = results.result?.analysis?.summary;
+              
+              if (summary) {
+                const coverage = Math.round((summary.repos_with_monitoring / summary.total_github_repos) * 100) || 0;
+                const orgName = '${{ github.repository_owner }}';
+                const releaseTag = '${{ github.event.release.tag_name }}';
+                
+                let comment = `## 🔍 New Relic Monitoring Analysis\n\n`;
+                comment += `**Organization:** ${orgName}\n`;
+                comment += `**Coverage:** ${coverage}% (${summary.repos_with_monitoring}/${summary.total_github_repos} repositories)\n\n`;
+                
+                if (summary.repos_missing_apm > 0) {
+                  comment += `⚠️ **${summary.repos_missing_apm} repositories** are missing New Relic monitoring.\n\n`;
+                  comment += `📥 Check the [workflow artifacts](${context.payload.repository.html_url}/actions/runs/${context.runId}) for detailed recommendations.`;
+                } else {
+                  comment += `✅ **Excellent!** All active repositories have New Relic monitoring.`;
+                }
+                
+                comment += `\n\n*Triggered by release: ${releaseTag}*`;
+
+                await github.rest.repos.createReleaseComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: context.payload.release.id,
+                  body: comment
+                });
+              }
+            } catch (error) {
+              console.log('Could not create release comment:', error.message);
+            }
