@@ -15,8 +15,10 @@ jobs:
           echo "🚀 Repository: ${{ github.repository }}"
           echo "📦 Release: ${{ github.event.release.tag_name || 'Manual trigger' }}"
           echo "🏢 Organization: ${{ github.repository_owner }}"
+          echo "🔗 MCP Server: ${{ vars.MCP_SERVER_URL }}"
+          echo "🆔 Account ID: ${{ vars.NEWRELIC_ACCOUNT_ID }}"
           
-          # Call your MCP server tool
+          # Call your MCP server tool with proper JSON-RPC format
           response=$(curl -s -X POST \
             "${{ vars.MCP_SERVER_URL || 'http://localhost:8080/remote/mcp/' }}" \
             -H "Content-Type: application/json" \
@@ -37,30 +39,40 @@ jobs:
               }
             }')
           
-          echo "📥 MCP Response:"
-          echo "$response" | jq '.'
+          echo "📥 Raw MCP Response:"
+          echo "$response"
           
-          # Extract key metrics
-          total_repos=$(echo "$response" | jq -r '.result.analysis.summary.total_github_repos // 0')
-          missing_apm=$(echo "$response" | jq -r '.result.analysis.summary.repos_missing_apm // 0')
-          coverage=$(echo "$response" | jq -r '.result.analysis.summary.repos_with_monitoring // 0')
-          
-          echo ""
-          echo "📊 === RESULTS SUMMARY ==="
-          echo "Total repositories: $total_repos"
-          echo "Missing APM monitoring: $missing_apm"
-          echo "With monitoring: $coverage"
-          
-          if [ "$missing_apm" -gt 0 ]; then
+          # Check if response is valid JSON before parsing
+          if echo "$response" | jq empty 2>/dev/null; then
             echo ""
-            echo "⚠️  Repositories missing New Relic monitoring:"
-            echo "$response" | jq -r '.result.analysis.gaps[]? | "  - \(.name) (\(.language // "Unknown"))"'
+            echo "📥 Formatted MCP Response:"
+            echo "$response" | jq '.'
+            
+            # Extract key metrics
+            total_repos=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.total_github_repos // 0' 2>/dev/null || echo "0")
+            missing_apm=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.repos_missing_apm // 0' 2>/dev/null || echo "0")
+            coverage=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.repos_with_monitoring // 0' 2>/dev/null || echo "0")
             
             echo ""
-            echo "💡 Recommended services:"
-            echo "$response" | jq -r '.result.analysis.recommendations[]? | "  \(.repo_name): \(.suggested_services | join(", "))"'
+            echo "📊 === RESULTS SUMMARY ==="
+            echo "Total repositories: $total_repos"
+            echo "Missing APM monitoring: $missing_apm"
+            echo "With monitoring: $coverage"
+            
+            if [ "$missing_apm" -gt 0 ]; then
+              echo ""
+              echo "⚠️  Repositories missing New Relic monitoring:"
+              echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.gaps[]? | "  - \(.name) (\(.language // "Unknown"))"' 2>/dev/null || echo "  (Could not parse gap details)"
+              
+              echo ""
+              echo "💡 Recommended services:"
+              echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.recommendations[]? | "  \(.repo_name): \(.suggested_services | join(", "))"' 2>/dev/null || echo "  (Could not parse recommendations)"
+            else
+              echo "✅ All repositories have monitoring coverage!"
+            fi
           else
-            echo "✅ All repositories have monitoring coverage!"
+            echo "❌ Invalid JSON response from MCP server"
+            echo "Response was: $response"
           fi
           
           # Save results for artifacts
@@ -81,9 +93,19 @@ jobs:
             const fs = require('fs');
             try {
               const results = JSON.parse(fs.readFileSync('mcp-analysis-results.json', 'utf8'));
-              const summary = results.result?.analysis?.summary;
               
-              if (summary) {
+              // Handle both direct result and MCP wrapped result
+              let analysis = null;
+              if (results.result && results.result.content && results.result.content[0]) {
+                // MCP wrapped response
+                analysis = JSON.parse(results.result.content[0].text).analysis;
+              } else if (results.analysis) {
+                // Direct response
+                analysis = results.analysis;
+              }
+              
+              if (analysis && analysis.summary) {
+                const summary = analysis.summary;
                 const coverage = Math.round((summary.repos_with_monitoring / summary.total_github_repos) * 100) || 0;
                 const orgName = '${{ github.repository_owner }}';
                 const releaseTag = '${{ github.event.release.tag_name }}';
@@ -94,6 +116,18 @@ jobs:
                 
                 if (summary.repos_missing_apm > 0) {
                   comment += `⚠️ **${summary.repos_missing_apm} repositories** are missing New Relic monitoring.\n\n`;
+                  
+                  if (analysis.gaps && analysis.gaps.length > 0) {
+                    comment += `**Missing monitoring:**\n`;
+                    analysis.gaps.slice(0, 5).forEach(gap => {
+                      comment += `- ${gap.name} (${gap.language || 'Unknown'})\n`;
+                    });
+                    if (analysis.gaps.length > 5) {
+                      comment += `- ... and ${analysis.gaps.length - 5} more\n`;
+                    }
+                    comment += `\n`;
+                  }
+                  
                   comment += `📥 Check the [workflow artifacts](${context.payload.repository.html_url}/actions/runs/${context.runId}) for detailed recommendations.`;
                 } else {
                   comment += `✅ **Excellent!** All active repositories have New Relic monitoring.`;
@@ -107,7 +141,10 @@ jobs:
                   release_id: context.payload.release.id,
                   body: comment
                 });
+              } else {
+                console.log('Could not parse analysis results:', JSON.stringify(results, null, 2));
               }
             } catch (error) {
               console.log('Could not create release comment:', error.message);
+              console.log('Raw results:', fs.readFileSync('mcp-analysis-results.json', 'utf8'));
             }
