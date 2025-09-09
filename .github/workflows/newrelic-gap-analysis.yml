@@ -50,14 +50,21 @@ jobs:
             
             # Extract key metrics
             total_repos=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.total_github_repos // 0' 2>/dev/null || echo "0")
+            total_newrelic_entities=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.total_newrelic_entities // 0' 2>/dev/null || echo "0")
             missing_apm=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.repos_missing_apm // 0' 2>/dev/null || echo "0")
             coverage=$(echo "$response" | jq -r '.result.content[0].text | fromjson | .analysis.summary.repos_with_monitoring // 0' 2>/dev/null || echo "0")
             
             echo ""
             echo "📊 === RESULTS SUMMARY ==="
-            echo "Total repositories: $total_repos"
+            echo "Total GitHub repositories: $total_repos"
+            echo "Total New Relic APM entities: $total_newrelic_entities"
             echo "Missing APM monitoring: $missing_apm"
             echo "With monitoring: $coverage"
+            
+            if [ "$total_repos" -gt 0 ]; then
+              coverage_percentage=$(( (coverage * 100) / total_repos ))
+              echo "Coverage percentage: ${coverage_percentage}%"
+            fi
             
             if [ "$missing_apm" -gt 0 ]; then
               echo ""
@@ -112,6 +119,8 @@ jobs:
                 
                 let comment = `## 🔍 New Relic Monitoring Analysis\n\n`;
                 comment += `**Organization:** ${orgName}\n`;
+                comment += `**GitHub Repositories:** ${summary.total_github_repos}\n`;
+                comment += `**New Relic APM Entities:** ${summary.total_newrelic_entities}\n`;
                 comment += `**Coverage:** ${coverage}% (${summary.repos_with_monitoring}/${summary.total_github_repos} repositories)\n\n`;
                 
                 if (summary.repos_missing_apm > 0) {
